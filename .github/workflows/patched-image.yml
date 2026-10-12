@@ -1,0 +1,89 @@
+name: Build and Publish Patched hbbs/hbbr Image
+
+# Builds the classic (single-binary) rustdesk-server image from this fork and
+# pushes it to GHCR.
+#
+# This fork carries exactly one change over upstream rustdesk/rustdesk-server:
+# the server-side secure_tcp key exchange (upstream PR #706). Everything else --
+# source, submodule pin, build steps, runtime layout -- is upstream, so the
+# image stays in line with the official one apart from that patch.
+#
+# Upstream ships two flavours:
+#   docker/          -> s6-overlay image (Docker Hub: rustdesk/rustdesk-server-s6)
+#   docker-classic/  -> scratch image, just hbbs + hbbr (Docker Hub: rustdesk/rustdesk-server)
+# We build the CLASSIC one: it matches the image already running on GTATL
+# (rustdesk/rustdesk-server:latest) and needs no s6 machinery.
+
+on:
+  push:
+    branches: [ "secure-tcp-keyexchange" ]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/rustdesk-server
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev
+
+      - name: Build hbbs and hbbr (release)
+        run: cargo build --release --locked
+
+      - name: Stage binaries for the classic image
+        run: |
+          mkdir -p docker-classic
+          cp target/release/hbbs docker-classic/hbbs
+          cp target/release/hbbr docker-classic/hbbr
+          chmod -v a+x docker-classic/hbbs docker-classic/hbbr
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=sha,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=secure-tcp
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./docker-classic
+          file: ./docker-classic/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
