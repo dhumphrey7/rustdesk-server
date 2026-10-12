@@ -38,22 +38,27 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
 
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config libssl-dev
-
-      - name: Build hbbs and hbbr (release)
-        run: cargo build --release --locked
+      # Build with `cross`, exactly as upstream does: it runs the build inside a
+      # container that ships a statically linked OpenSSL for musl. A plain
+      # `cargo build --target=...-musl` fails at openssl-sys, and without musl
+      # the binary is glibc-dynamic and cannot exec in the FROM scratch image
+      # ("exec /usr/bin/hbbs: no such file or directory").
+      - name: Build hbbs and hbbr (release, static musl)
+        uses: houseabsolute/actions-rust-cross@v1
+        with:
+          target: x86_64-unknown-linux-musl
+          args: "--release --locked"
+          command: build
 
       - name: Stage binaries for the classic image
         run: |
-          mkdir -p docker-classic
-          cp target/release/hbbs docker-classic/hbbs
-          cp target/release/hbbr docker-classic/hbbr
+          cp target/x86_64-unknown-linux-musl/release/hbbs docker-classic/hbbs
+          cp target/x86_64-unknown-linux-musl/release/hbbr docker-classic/hbbr
           chmod -v a+x docker-classic/hbbs docker-classic/hbbr
+          file docker-classic/hbbs
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
