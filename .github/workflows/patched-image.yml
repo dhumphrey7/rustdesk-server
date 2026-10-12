@@ -1,18 +1,18 @@
 name: Build and Publish Patched hbbs/hbbr Image
 
-# Builds the classic (single-binary) rustdesk-server image from this fork and
-# pushes it to GHCR.
+# Builds a rustdesk-server (classic) image from this fork and pushes it to GHCR.
 #
 # This fork carries exactly one change over upstream rustdesk/rustdesk-server:
-# the server-side secure_tcp key exchange (upstream PR #706). Everything else --
-# source, submodule pin, build steps, runtime layout -- is upstream, so the
-# image stays in line with the official one apart from that patch.
+# the server-side secure_tcp key exchange (upstream PR #706). Source, submodule
+# pin and runtime layout are upstream, so the image stays in line with the
+# official one apart from that patch.
 #
-# Upstream ships two flavours:
-#   docker/          -> s6-overlay image (Docker Hub: rustdesk/rustdesk-server-s6)
-#   docker-classic/  -> scratch image, just hbbs + hbbr (Docker Hub: rustdesk/rustdesk-server)
-# We build the CLASSIC one: it matches the image already running on GTATL
-# (rustdesk/rustdesk-server:latest) and needs no s6 machinery.
+# The image is built by docker-musl/Dockerfile, which compiles the binaries as
+# statically linked musl inside rust:alpine and packages them into a FROM
+# scratch image -- the same shape as upstream's classic image. Doing the whole
+# build inside one docker build avoids the host-toolchain problems that broke
+# the earlier cargo and cross approaches (glibc-dynamic binaries cannot exec in
+# a scratch rootfs, and cross's musl image ships no static OpenSSL).
 
 on:
   push:
@@ -24,7 +24,7 @@ env:
   IMAGE_NAME: ${{ github.repository_owner }}/rustdesk-server
 
 jobs:
-  build:
+  build-and-push:
     runs-on: ubuntu-22.04
     permissions:
       contents: read
@@ -35,48 +35,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: recursive
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-musl
-
-      # The FROM scratch image needs statically linked binaries. A plain
-      # `cargo build --target=...-musl` fails at openssl-sys (no static
-      # OpenSSL), so build inside cross's container, as upstream does.
-      - name: Verify container engine (cross requires it)
-        run: |
-          docker version
-          docker info >/dev/null
-
-      - name: Install cross
-        run: |
-          curl -fsSL https://github.com/cross-rs/cross/releases/latest/download/cross-x86_64-unknown-linux-musl.tar.gz \
-            | tar -xz -C /usr/local/bin cross
-          cross --version
-
-      - name: Build hbbs and hbbr (release, static musl)
-        run: |
-          # Fail loudly if cross cannot use a container: silently falling back
-          # to host cargo builds a glibc-dynamic binary that cannot exec in the
-          # FROM scratch image ("exec /usr/bin/hbbs: no such file or directory").
-          cross build --release --locked --target=x86_64-unknown-linux-musl 2>&1 | tee /tmp/cross.log
-          if grep -q 'Falling back to `cargo` on the host' /tmp/cross.log; then
-            echo "::error::cross fell back to host cargo; musl build did not run"
-            exit 1
-          fi
-
-      - name: Stage binaries for the classic image
-        run: |
-          cp target/x86_64-unknown-linux-musl/release/hbbs docker-classic/hbbs
-          cp target/x86_64-unknown-linux-musl/release/hbbr docker-classic/hbbr
-          chmod -v a+x docker-classic/hbbs docker-classic/hbbr
-          # Assert the binaries are static, not glibc-dynamic.
-          file docker-classic/hbbs
-          file docker-classic/hbbs | grep -q 'statically linked' || {
-            echo "::error::hbbs is not statically linked; it will not run in the scratch image"
-            exit 1
-          }
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -97,14 +55,13 @@ jobs:
           tags: |
             type=ref,event=branch
             type=sha,format=short
-            type=raw,value=latest,enable={{is_default_branch}}
             type=raw,value=secure-tcp
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
-          context: ./docker-classic
-          file: ./docker-classic/Dockerfile
+          context: .
+          file: ./docker-musl/Dockerfile
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
