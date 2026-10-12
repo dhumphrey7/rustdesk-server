@@ -41,17 +41,20 @@ jobs:
         with:
           targets: x86_64-unknown-linux-musl
 
-      # Build with `cross`, exactly as upstream does: it runs the build inside a
-      # container that ships a statically linked OpenSSL for musl. A plain
-      # `cargo build --target=...-musl` fails at openssl-sys, and without musl
+      # Build with `cross`, exactly as upstream's build job does. cross runs the
+      # build inside a container that ships a statically linked OpenSSL for
+      # musl; a plain `cargo build --target=...-musl` fails at openssl-sys
+      # ("Could not find directory of OpenSSL installation"), and without musl
       # the binary is glibc-dynamic and cannot exec in the FROM scratch image
       # ("exec /usr/bin/hbbs: no such file or directory").
+      - name: Install cross
+        run: |
+          curl -fsSL https://github.com/cross-rs/cross/releases/latest/download/cross-x86_64-unknown-linux-musl.tar.gz \
+            | tar -xz -C /usr/local/bin cross
+          cross --version
+
       - name: Build hbbs and hbbr (release, static musl)
-        uses: houseabsolute/actions-rust-cross@v1
-        with:
-          target: x86_64-unknown-linux-musl
-          args: "--release --locked"
-          command: build
+        run: cross build --release --locked --target=x86_64-unknown-linux-musl
 
       - name: Stage binaries for the classic image
         run: |
