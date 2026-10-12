@@ -41,12 +41,14 @@ jobs:
         with:
           targets: x86_64-unknown-linux-musl
 
-      # Build with `cross`, exactly as upstream's build job does. cross runs the
-      # build inside a container that ships a statically linked OpenSSL for
-      # musl; a plain `cargo build --target=...-musl` fails at openssl-sys
-      # ("Could not find directory of OpenSSL installation"), and without musl
-      # the binary is glibc-dynamic and cannot exec in the FROM scratch image
-      # ("exec /usr/bin/hbbs: no such file or directory").
+      # The FROM scratch image needs statically linked binaries. A plain
+      # `cargo build --target=...-musl` fails at openssl-sys (no static
+      # OpenSSL), so build inside cross's container, as upstream does.
+      - name: Verify container engine (cross requires it)
+        run: |
+          docker version
+          docker info >/dev/null
+
       - name: Install cross
         run: |
           curl -fsSL https://github.com/cross-rs/cross/releases/latest/download/cross-x86_64-unknown-linux-musl.tar.gz \
@@ -54,14 +56,27 @@ jobs:
           cross --version
 
       - name: Build hbbs and hbbr (release, static musl)
-        run: cross build --release --locked --target=x86_64-unknown-linux-musl
+        run: |
+          # Fail loudly if cross cannot use a container: silently falling back
+          # to host cargo builds a glibc-dynamic binary that cannot exec in the
+          # FROM scratch image ("exec /usr/bin/hbbs: no such file or directory").
+          cross build --release --locked --target=x86_64-unknown-linux-musl 2>&1 | tee /tmp/cross.log
+          if grep -q 'Falling back to `cargo` on the host' /tmp/cross.log; then
+            echo "::error::cross fell back to host cargo; musl build did not run"
+            exit 1
+          fi
 
       - name: Stage binaries for the classic image
         run: |
           cp target/x86_64-unknown-linux-musl/release/hbbs docker-classic/hbbs
           cp target/x86_64-unknown-linux-musl/release/hbbr docker-classic/hbbr
           chmod -v a+x docker-classic/hbbs docker-classic/hbbr
+          # Assert the binaries are static, not glibc-dynamic.
           file docker-classic/hbbs
+          file docker-classic/hbbs | grep -q 'statically linked' || {
+            echo "::error::hbbs is not statically linked; it will not run in the scratch image"
+            exit 1
+          }
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
